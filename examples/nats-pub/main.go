@@ -17,6 +17,7 @@ import (
 	"flag"
 	"log"
 	"os"
+	"time"
 
 	"github.com/nats-io/nats.go"
 )
@@ -69,7 +70,11 @@ func main() {
 	defer nc.Close()
 	subj, msg := args[0], []byte(args[1])
 
-	nc.Publish(subj, msg)
+	for i := 0; i < 10000; i++ {
+		time.Sleep(10000000)
+		nc.Publish(subj, msg)
+	}
+
 	nc.Flush()
 
 	if err := nc.LastError(); err != nil {

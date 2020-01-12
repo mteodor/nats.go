@@ -15,17 +15,33 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"os"
-	"runtime"
+	"os/signal"
+	"syscall"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/nats-io/nats.go"
 )
 
 // NOTE: Can test with demo servers.
 // nats-sub -s demo.nats.io <subject>
 // nats-sub -s demo.nats.io:4443 <subject> (TLS version)
+
+const (
+	password = "b7e6e968-ff42-413e-a360-9118c8bb90f0"
+	username = "8cd9817e-55be-4e7b-8d6b-46897e9facc1"
+	channel  = "cfb02ccf-6703-4603-a042-2271532801f4"
+	topic    = "channels/cfb02ccf-6703-4603-a042-2271532801f4/messages"
+	mqttHost = "tcp://localhost:18831"
+)
+
+var client mqtt.Client
+var nc *nats.Conn
+var sub *nats.Subscription
+var i = 0
 
 func usage() {
 	log.Printf("Usage: nats-sub [-s server] [-creds file] [-t] <subject>\n")
@@ -39,6 +55,7 @@ func showUsageAndExit(exitcode int) {
 
 func printMsg(m *nats.Msg, i int) {
 	log.Printf("[#%d] Received on [%s]: '%s'", i, m.Subject, string(m.Data))
+	client.Publish(topic, 0, false, m.Data)
 }
 
 func main() {
@@ -69,6 +86,8 @@ func main() {
 		opts = append(opts, nats.UserCredentials(*userCreds))
 	}
 
+	// connect to mqtt
+	client, _ = mqttConnect(args[0], *urls, opts...)
 	// Connect to NATS
 	nc, err := nats.Connect(*urls, opts...)
 	if err != nil {
@@ -77,7 +96,7 @@ func main() {
 
 	subj, i := args[0], 0
 
-	nc.Subscribe(subj, func(msg *nats.Msg) {
+	sub, err = nc.QueueSubscribe(subj, "test", func(msg *nats.Msg) {
 		i += 1
 		printMsg(msg, i)
 	})
@@ -91,8 +110,16 @@ func main() {
 	if *showTime {
 		log.SetFlags(log.LstdFlags)
 	}
+	errs := make(chan error)
 
-	runtime.Goexit()
+	go func() {
+		c := make(chan os.Signal)
+		signal.Notify(c, syscall.SIGINT)
+		errs <- fmt.Errorf("%s", <-c)
+	}()
+
+	err = <-errs
+
 }
 
 func setupConnOptions(opts []nats.Option) []nats.Option {
@@ -108,7 +135,52 @@ func setupConnOptions(opts []nats.Option) []nats.Option {
 		log.Printf("Reconnected [%s]", nc.ConnectedUrl())
 	}))
 	opts = append(opts, nats.ClosedHandler(func(nc *nats.Conn) {
-		log.Fatalf("Exiting: %v", nc.LastError())
+		fmt.Println(fmt.Sprintf("Exiting: %v", nc.LastError()))
 	}))
 	return opts
+}
+
+func mqttConnect(subj, urls string, options ...nats.Option) (mqtt.Client, error) {
+	conn := func(client mqtt.Client) {
+		fmt.Println(fmt.Sprintf("Client %s connected", "EXPORT"))
+		nc, _ = nats.Connect(urls, options...)
+		sub, _ = nc.QueueSubscribe(subj, "test", func(msg *nats.Msg) {
+			i += 1
+			printMsg(msg, i)
+		})
+		nc.Flush()
+
+		if err := nc.LastError(); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	lost := func(client mqtt.Client, err error) {
+		fmt.Println(fmt.Sprintf("Client %s disconnected", "EXPORT"))
+		sub.Unsubscribe()
+		nc.Close()
+	}
+
+	opts := mqtt.NewClientOptions().
+		AddBroker(mqttHost).
+		SetClientID("EXPORT").
+		SetCleanSession(true).
+		SetAutoReconnect(true).
+		SetOnConnectHandler(conn).
+		SetConnectionLostHandler(lost)
+
+	if username != "" && password != "" {
+		opts.SetUsername(username)
+		opts.SetPassword(password)
+	}
+
+	client := mqtt.NewClient(opts)
+	token := client.Connect()
+	token.Wait()
+
+	if token.Error() != nil {
+		fmt.Println(fmt.Sprintf("Client %s had error connecting to the broker: %s\n", "EXPORT", token.Error().Error()))
+		return nil, token.Error()
+	}
+	return client, nil
 }
